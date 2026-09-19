@@ -3,7 +3,7 @@
  * Plugin Name: پیامک سفارشات ووکامرس
  * Plugin URI: https://github.com/sahandse/woocommerce-sms-orders
  * Description: ارسال و مدیریت پیامک وضعیت سفارش‌های ووکامرس با لاگ، ارسال آزمایشی و پشتیبانی از چند سرویس پیامک.
- * Version: 1.0.2
+ * Version: 1.1.0
  * Author: Sahand Rezvan
  * Author URI: https://github.com/sahandse
  * Text Domain: woocommerce-sms-orders
@@ -15,7 +15,7 @@
 defined('ABSPATH') || exit;
 
 final class WSO_Plugin {
-    const VERSION = '1.0.2';
+    const VERSION = '1.1.0';
     const OPTION  = 'wso_settings';
     const LOG_OPTION = 'wso_sms_logs';
 
@@ -45,6 +45,7 @@ final class WSO_Plugin {
         add_action('admin_enqueue_scripts', [$this, 'admin_assets']);
 
         add_action('woocommerce_order_status_changed', [$this, 'order_status_changed'], 10, 4);
+        add_action('admin_post_wso_test_sms', [$this, 'test_sms']);
     }
 
     public function woocommerce_notice() {
@@ -67,6 +68,7 @@ final class WSO_Plugin {
             'status_cancelled' => 'yes',
             'status_failed' => 'yes',
             'accent' => '#111827',
+            'message_template' => 'سفارش #{order_id} در وضعیت «{status}» قرار گرفت. مبلغ: {total}',
         ];
     }
 
@@ -97,6 +99,7 @@ final class WSO_Plugin {
             'status_cancelled' => !empty($in['status_cancelled']) ? 'yes' : 'no',
             'status_failed' => !empty($in['status_failed']) ? 'yes' : 'no',
             'accent' => sanitize_hex_color($in['accent'] ?? '') ?: $d['accent'],
+            'message_template' => sanitize_textarea_field($in['message_template'] ?? $d['message_template']),
         ];
     }
 
@@ -155,6 +158,7 @@ final class WSO_Plugin {
         $s = $this->settings();
         ?>
         <div class="wrap wso-admin">
+            <?php if(!empty($_GET['wso_notice'])):?><div class="notice notice-info"><p><?php echo esc_html(rawurldecode(sanitize_text_field(wp_unslash($_GET['wso_notice'])))); ?></p></div><?php endif; ?>
             <div class="wso-hero">
                 <div>
                     <h1>پیامک سفارشات ووکامرس</h1>
@@ -193,6 +197,15 @@ final class WSO_Plugin {
                     </section>
 
                     <section class="wso-card">
+                        <h2>متن پیام</h2>
+                        <label>قالب پیام
+                            <textarea rows="5" name="<?php echo self::OPTION; ?>[message_template]"><?php echo esc_textarea($s['message_template']); ?></textarea>
+                            <small>متغیرها: {order_id} {status} {total} {name}</small>
+                        </label>
+                        <p><a class="button" href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=wso_test_sms'),'wso_test_sms')); ?>">ارسال آزمایشی به اولین شماره مدیر</a></p>
+                    </section>
+
+                    <section class="wso-card">
                         <h2>دریافت‌کنندگان</h2>
                         <label class="wso-switch"><span>ارسال به مشتری</span><input type="checkbox" name="<?php echo self::OPTION; ?>[send_to_customer]" value="1" <?php checked($s['send_to_customer'],'yes'); ?>></label>
                         <label class="wso-switch"><span>ارسال به مدیر</span><input type="checkbox" name="<?php echo self::OPTION; ?>[send_to_admin]" value="1" <?php checked($s['send_to_admin'],'yes'); ?>></label>
@@ -220,7 +233,7 @@ final class WSO_Plugin {
 
                     <section class="wso-card wso-wide">
                         <h2>وضعیت توسعه</h2>
-                        <p>هسته تشخیص تغییر وضعیت و سیستم لاگ آماده است. ارسال واقعی API، Pattern/OTP، اعتبار پنل و ارسال دستی از صفحه سفارش در نسخه‌های بعدی همین Repo تکمیل می‌شود.</p>
+                        <p>ارسال واقعی API برای سرویس‌های اصلی فعال است. برای ارسال، Credential و خط فرستنده را در همین صفحه وارد کنید.</p>
                     </section>
                 </div>
 
@@ -274,23 +287,107 @@ final class WSO_Plugin {
         <?php
     }
 
+    private function normalize_phone($phone) {
+        $phone = preg_replace('/\D+/', '', (string)$phone);
+        if (0 === strpos($phone,'0098')) $phone = substr($phone,4);
+        if (0 === strpos($phone,'98') && strlen($phone) > 10) $phone = '0' . substr($phone,2);
+        return $phone;
+    }
+
+    private function render_message($order,$status) {
+        $s=$this->settings();
+        return strtr($s['message_template'],[
+            '{order_id}'=>(string)$order->get_id(),
+            '{status}'=>wc_get_order_status_name($status),
+            '{total}'=>wp_strip_all_tags($order->get_formatted_order_total()),
+            '{name}'=>trim($order->get_billing_first_name().' '.$order->get_billing_last_name()),
+        ]);
+    }
+
+    private function send_sms($phone,$message) {
+        $s=$this->settings();
+        $phone=$this->normalize_phone($phone);
+        if(!$phone) return new WP_Error('wso_phone','شماره گیرنده معتبر نیست.');
+        if('none'===$s['provider']) return new WP_Error('wso_provider','سرویس پیامک انتخاب نشده است.');
+
+        $provider=$s['provider'];
+        $args=['timeout'=>20,'headers'=>[]];
+
+        if('kavenegar'===$provider){
+            if(!$s['api_key']) return new WP_Error('wso_auth','API Key کاوه‌نگار وارد نشده است.');
+            $url='https://api.kavenegar.com/v1/'.rawurlencode($s['api_key']).'/sms/send.json';
+            $args['body']=['receptor'=>$phone,'sender'=>$s['sender'],'message'=>$message];
+            $res=wp_remote_post($url,$args);
+        } elseif('smsir'===$provider){
+            if(!$s['api_key']) return new WP_Error('wso_auth','API Key SMS.ir وارد نشده است.');
+            $url='https://api.sms.ir/v1/send/bulk';
+            $args['headers']=['Content-Type'=>'application/json','X-API-KEY'=>$s['api_key']];
+            $args['body']=wp_json_encode(['lineNumber'=>$s['sender'],'messageText'=>$message,'mobiles'=>[$phone]]);
+            $res=wp_remote_post($url,$args);
+        } elseif('ghasedak'===$provider){
+            if(!$s['api_key']) return new WP_Error('wso_auth','API Key قاصدک وارد نشده است.');
+            $url='https://gateway.ghasedak.me/rest/api/v1/WebService/SendSingleSMS';
+            $args['headers']=['Content-Type'=>'application/json','ApiKey'=>$s['api_key']];
+            $args['body']=wp_json_encode(['message'=>$message,'lineNumber'=>$s['sender'],'receptor'=>$phone]);
+            $res=wp_remote_post($url,$args);
+        } elseif('farazsms'===$provider){
+            if(!$s['api_key']) return new WP_Error('wso_auth','Token فراز/IPPanel وارد نشده است.');
+            $url='https://edge.ippanel.com/v1/api/send';
+            $to='+98'.ltrim($phone,'0');
+            $from=$s['sender'] ? $s['sender'] : '';
+            $args['headers']=['Content-Type'=>'application/json','Authorization'=>$s['api_key']];
+            $args['body']=wp_json_encode(['sending_type'=>'peer_to_peer','from_number'=>$from,'params'=>[['recipients'=>[$to],'message'=>$message]]]);
+            $res=wp_remote_post($url,$args);
+        } elseif('melipayamak'===$provider){
+            if(!$s['username']||!$s['password']) return new WP_Error('wso_auth','نام کاربری/رمز ملی‌پیامک وارد نشده است.');
+            $url='https://rest.payamak-panel.com/api/SendSMS/SendSMS';
+            $args['headers']=['Content-Type'=>'application/json'];
+            $args['body']=wp_json_encode(['username'=>$s['username'],'password'=>$s['password'],'to'=>$phone,'from'=>$s['sender'],'text'=>$message,'isFlash'=>false]);
+            $res=wp_remote_post($url,$args);
+        } else {
+            return new WP_Error('wso_provider','سرویس پشتیبانی‌نشده است.');
+        }
+
+        if(is_wp_error($res)) return $res;
+        $code=(int)wp_remote_retrieve_response_code($res);
+        $body=wp_remote_retrieve_body($res);
+        if($code<200||$code>=300) return new WP_Error('wso_http','خطای سرویس پیامک: HTTP '.$code.' '.$body);
+        return ['code'=>$code,'body'=>$body];
+    }
+
+    public function test_sms() {
+        if(!current_user_can('manage_woocommerce')) wp_die('دسترسی غیرمجاز');
+        check_admin_referer('wso_test_sms');
+        $s=$this->settings();
+        $numbers=array_values(array_filter(array_map('trim',explode(',',$s['admin_numbers']))));
+        if(!$numbers) wp_die('ابتدا یک شماره مدیر وارد کنید.');
+        $r=$this->send_sms($numbers[0],'پیام آزمایشی افزونه پیامک سفارشات ووکامرس');
+        $msg=is_wp_error($r)?$r->get_error_message():'پیام آزمایشی ارسال شد.';
+        wp_safe_redirect(add_query_arg(['page'=>'woocommerce-sms-orders','wso_notice'=>rawurlencode($msg)],admin_url('admin.php'))); exit;
+    }
+
     public function order_status_changed($order_id, $old_status, $new_status, $order) {
         $s = $this->settings();
         $key = 'status_' . $new_status;
-
         if (!isset($s[$key]) || 'yes' !== $s[$key]) return;
+        if(!$order instanceof WC_Order) $order=wc_get_order($order_id);
+        if(!$order) return;
+
+        $message=$this->render_message($order,$new_status);
 
         if ('yes' === $s['send_to_customer']) {
             $phone = $order->get_billing_phone();
             if ($phone) {
-                $this->log_event($order_id, $new_status, $phone, 'pending-provider');
+                $r=$this->send_sms($phone,$message);
+                $this->log_event($order_id,$new_status,$phone,is_wp_error($r)?'error: '.$r->get_error_message():'sent');
             }
         }
 
         if ('yes' === $s['send_to_admin']) {
             $admins = array_filter(array_map('trim', explode(',', $s['admin_numbers'])));
             foreach ($admins as $phone) {
-                $this->log_event($order_id, $new_status, $phone, 'pending-provider');
+                $r=$this->send_sms($phone,$message);
+                $this->log_event($order_id,$new_status,$phone,is_wp_error($r)?'error: '.$r->get_error_message():'sent');
             }
         }
     }
