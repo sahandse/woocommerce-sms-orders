@@ -3,7 +3,7 @@
  * Plugin Name: پیامک سفارشات ووکامرس
  * Plugin URI: https://github.com/sahandse/woocommerce-sms-orders
  * Description: ارسال و مدیریت پیامک وضعیت سفارش‌های ووکامرس با لاگ، ارسال آزمایشی و پشتیبانی از چند سرویس پیامک.
- * Version: 1.1.0
+ * Version: 1.2.0
  * Author: Sahand Rezvan
  * Author URI: https://github.com/sahandse
  * Text Domain: woocommerce-sms-orders
@@ -15,7 +15,7 @@
 defined('ABSPATH') || exit;
 
 final class WSO_Plugin {
-    const VERSION = '1.1.0';
+    const VERSION = '1.2.0';
     const OPTION  = 'wso_settings';
     const LOG_OPTION = 'wso_sms_logs';
 
@@ -46,6 +46,9 @@ final class WSO_Plugin {
 
         add_action('woocommerce_order_status_changed', [$this, 'order_status_changed'], 10, 4);
         add_action('admin_post_wso_test_sms', [$this, 'test_sms']);
+        add_action('admin_post_wso_manual_sms', [$this, 'manual_sms']);
+        add_action('woocommerce_admin_order_data_after_order_details', [$this, 'manual_sms_box']);
+        add_filter('s_store_sms_send', [$this, 'external_send_sms'], 10, 4);
     }
 
     public function woocommerce_notice() {
@@ -69,6 +72,8 @@ final class WSO_Plugin {
             'status_failed' => 'yes',
             'accent' => '#111827',
             'message_template' => 'سفارش #{order_id} در وضعیت «{status}» قرار گرفت. مبلغ: {total}',
+            'send_mode' => 'text',
+            'pattern_code' => '',
         ];
     }
 
@@ -100,6 +105,8 @@ final class WSO_Plugin {
             'status_failed' => !empty($in['status_failed']) ? 'yes' : 'no',
             'accent' => sanitize_hex_color($in['accent'] ?? '') ?: $d['accent'],
             'message_template' => sanitize_textarea_field($in['message_template'] ?? $d['message_template']),
+            'send_mode' => in_array($in['send_mode'] ?? '', ['text','pattern'], true) ? $in['send_mode'] : 'text',
+            'pattern_code' => sanitize_text_field($in['pattern_code'] ?? ''),
         ];
     }
 
@@ -198,6 +205,15 @@ final class WSO_Plugin {
 
                     <section class="wso-card">
                         <h2>متن پیام</h2>
+                        <label>حالت ارسال
+                            <select name="<?php echo self::OPTION; ?>[send_mode]">
+                                <option value="text" <?php selected($s['send_mode'],'text'); ?>>متن عادی</option>
+                                <option value="pattern" <?php selected($s['send_mode'],'pattern'); ?>>Pattern (فراز/IPPanel)</option>
+                            </select>
+                        </label>
+                        <label>کد Pattern
+                            <input type="text" name="<?php echo self::OPTION; ?>[pattern_code]" value="<?php echo esc_attr($s['pattern_code']); ?>">
+                        </label>
                         <label>قالب پیام
                             <textarea rows="5" name="<?php echo self::OPTION; ?>[message_template]"><?php echo esc_textarea($s['message_template']); ?></textarea>
                             <small>متغیرها: {order_id} {status} {total} {name}</small>
@@ -304,7 +320,7 @@ final class WSO_Plugin {
         ]);
     }
 
-    private function send_sms($phone,$message) {
+    private function send_sms($phone,$message,$params=[]) {
         $s=$this->settings();
         $phone=$this->normalize_phone($phone);
         if(!$phone) return new WP_Error('wso_phone','شماره گیرنده معتبر نیست.');
@@ -336,7 +352,17 @@ final class WSO_Plugin {
             $to='+98'.ltrim($phone,'0');
             $from=$s['sender'] ? $s['sender'] : '';
             $args['headers']=['Content-Type'=>'application/json','Authorization'=>$s['api_key']];
-            $args['body']=wp_json_encode(['sending_type'=>'peer_to_peer','from_number'=>$from,'params'=>[['recipients'=>[$to],'message'=>$message]]]);
+            if('pattern'===$s['send_mode'] && $s['pattern_code']){
+                $args['body']=wp_json_encode([
+                    'sending_type'=>'pattern',
+                    'from_number'=>$from,
+                    'code'=>$s['pattern_code'],
+                    'recipients'=>[$to],
+                    'params'=>$params ?: ['message'=>$message]
+                ]);
+            } else {
+                $args['body']=wp_json_encode(['sending_type'=>'peer_to_peer','from_number'=>$from,'params'=>[['recipients'=>[$to],'message'=>$message]]]);
+            }
             $res=wp_remote_post($url,$args);
         } elseif('melipayamak'===$provider){
             if(!$s['username']||!$s['password']) return new WP_Error('wso_auth','نام کاربری/رمز ملی‌پیامک وارد نشده است.');
@@ -378,7 +404,7 @@ final class WSO_Plugin {
         if ('yes' === $s['send_to_customer']) {
             $phone = $order->get_billing_phone();
             if ($phone) {
-                $r=$this->send_sms($phone,$message);
+                $r=$this->send_sms($phone,$message,['order_id'=>(string)$order_id,'status'=>wc_get_order_status_name($new_status),'total'=>(string)$order->get_total(),'name'=>trim($order->get_billing_first_name().' '.$order->get_billing_last_name())]);
                 $this->log_event($order_id,$new_status,$phone,is_wp_error($r)?'error: '.$r->get_error_message():'sent');
             }
         }
@@ -390,6 +416,34 @@ final class WSO_Plugin {
                 $this->log_event($order_id,$new_status,$phone,is_wp_error($r)?'error: '.$r->get_error_message():'sent');
             }
         }
+    }
+
+    public function external_send_sms($result,$phone,$message,$context='') {
+        if(null!==$result) return $result;
+        return $this->send_sms($phone,$message,['context'=>(string)$context]);
+    }
+
+    public function manual_sms_box($order) {
+        if(!$order instanceof WC_Order || !current_user_can('manage_woocommerce')) return;
+        echo '<div class="wso-manual-box" style="margin-top:12px;padding-top:12px;border-top:1px solid #ddd"><h4>ارسال پیامک دستی</h4>';
+        echo '<form method="post" action="'.esc_url(admin_url('admin-post.php')).'"><input type="hidden" name="action" value="wso_manual_sms"><input type="hidden" name="order_id" value="'.esc_attr($order->get_id()).'">';
+        wp_nonce_field('wso_manual_sms_'.$order->get_id(),'wso_nonce');
+        echo '<p><input type="text" name="phone" value="'.esc_attr($order->get_billing_phone()).'" placeholder="شماره موبایل" style="width:100%"></p>';
+        echo '<p><textarea name="message" rows="3" style="width:100%" placeholder="متن پیام" required></textarea></p>';
+        echo '<p><button class="button">ارسال پیامک</button></p></form></div>';
+    }
+
+    public function manual_sms() {
+        if(!current_user_can('manage_woocommerce')) wp_die('دسترسی غیرمجاز');
+        $order_id=absint($_POST['order_id']??0);
+        $nonce=sanitize_text_field(wp_unslash($_POST['wso_nonce']??''));
+        if(!wp_verify_nonce($nonce,'wso_manual_sms_'.$order_id)) wp_die('درخواست نامعتبر');
+        $phone=sanitize_text_field(wp_unslash($_POST['phone']??''));
+        $message=sanitize_textarea_field(wp_unslash($_POST['message']??''));
+        $r=$this->send_sms($phone,$message,['order_id'=>(string)$order_id,'message'=>$message]);
+        $this->log_event($order_id,'manual',$phone,is_wp_error($r)?'error: '.$r->get_error_message():'sent');
+        $url=wp_get_referer()?:admin_url('edit.php?post_type=shop_order');
+        wp_safe_redirect(add_query_arg('wso_manual',is_wp_error($r)?'error':'sent',$url)); exit;
     }
 
     private function log_event($order_id, $status, $recipient, $result) {
