@@ -1,0 +1,41 @@
+name: Build Plugin ZIP
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare plugin
+        run: |
+          mkdir -p build/woocommerce-sms-orders
+          rsync -av --exclude='.git' --exclude='.github' --exclude='build' ./ build/woocommerce-sms-orders/
+
+      - name: Create ZIP
+        run: |
+          cd build
+          zip -r woocommerce-sms-orders.zip woocommerce-sms-orders
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: woocommerce-sms-orders
+          path: build/woocommerce-sms-orders.zip
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/woocommerce-sms-orders.zip
+          generate_release_notes: true
