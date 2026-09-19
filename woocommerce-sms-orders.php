@@ -3,7 +3,7 @@
  * Plugin Name: پیامک سفارشات ووکامرس
  * Plugin URI: https://github.com/sahandse/woocommerce-sms-orders
  * Description: ارسال و مدیریت پیامک وضعیت سفارش‌های ووکامرس با لاگ، ارسال آزمایشی و پشتیبانی از چند سرویس پیامک.
- * Version: 1.0.1
+ * Version: 1.0.2
  * Author: Sahand Rezvan
  * Author URI: https://github.com/sahandse
  * Text Domain: woocommerce-sms-orders
@@ -15,7 +15,7 @@
 defined('ABSPATH') || exit;
 
 final class WSO_Plugin {
-    const VERSION = '1.0.1';
+    const VERSION = '1.0.2';
     const OPTION  = 'wso_settings';
     const LOG_OPTION = 'wso_sms_logs';
 
@@ -102,9 +102,24 @@ final class WSO_Plugin {
 
     public function admin_menu() {
         if (function_exists('s_store_register_submenu')) {
-            s_store_register_submenu('woocommerce-sms-orders', 'پیامک سفارشات', [$this, 'settings_page'], 'manage_woocommerce', 'پیامک سفارشات');
+            s_store_register_submenu(
+                'woocommerce-sms-orders',
+                'پیامک سفارشات',
+                [$this, 'settings_page'],
+                'manage_woocommerce',
+                'پیامک سفارشات'
+            );
+            add_submenu_page(
+                's-store',
+                'لاگ پیامک‌ها',
+                '↳ لاگ پیامک‌ها',
+                'manage_woocommerce',
+                'woocommerce-sms-orders-logs',
+                [$this, 'logs_page']
+            );
             return;
         }
+
         add_submenu_page(
             'woocommerce',
             'پیامک سفارشات',
@@ -125,7 +140,13 @@ final class WSO_Plugin {
     }
 
     public function admin_assets($hook) {
-        if (false === strpos($hook, 'woocommerce-sms-orders')) return;
+        $page = isset($_GET['page']) ? sanitize_key(wp_unslash($_GET['page'])) : '';
+        $valid_pages = ['woocommerce-sms-orders', 'woocommerce-sms-orders-logs'];
+
+        if (!in_array($page, $valid_pages, true) && false === strpos($hook, 'woocommerce-sms-orders')) {
+            return;
+        }
+
         wp_enqueue_style('wso-admin', plugin_dir_url(__FILE__) . 'assets/admin.css', [], self::VERSION);
     }
 
