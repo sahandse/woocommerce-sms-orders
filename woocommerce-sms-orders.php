@@ -3,7 +3,7 @@
  * Plugin Name: پیامک سفارشات ووکامرس
  * Plugin URI: https://github.com/sahandse/woocommerce-sms-orders
  * Description: ارسال و مدیریت پیامک وضعیت سفارش‌های ووکامرس با لاگ، ارسال آزمایشی و پشتیبانی از چند سرویس پیامک.
- * Version: 1.2.0
+ * Version: 1.2.1
  * Author: Sahand Rezvan
  * Author URI: https://github.com/sahandse
  * Text Domain: woocommerce-sms-orders
@@ -15,7 +15,7 @@
 defined('ABSPATH') || exit;
 
 final class WSO_Plugin {
-    const VERSION = '1.2.0';
+    const VERSION = '1.2.1';
     const OPTION  = 'wso_settings';
     const LOG_OPTION = 'wso_sms_logs';
 
@@ -192,14 +192,16 @@ final class WSO_Plugin {
                         <label>API Key
                             <input type="password" name="<?php echo self::OPTION; ?>[api_key]" value="<?php echo esc_attr($s['api_key']); ?>" autocomplete="off">
                         </label>
-                        <label>نام کاربری
-                            <input type="text" name="<?php echo self::OPTION; ?>[username]" value="<?php echo esc_attr($s['username']); ?>">
+                        <div class="wso-provider-note"><strong>تنظیمات ملی‌پیامک:</strong> برای اتصال وب‌سرویس، نام کاربری، رمز وب‌سرویس و شماره ارسال‌کننده/خط خدماتی پنل را وارد کنید.</div>
+                        <label>نام کاربری وب‌سرویس
+                            <input type="text" name="<?php echo self::OPTION; ?>[username]" value="<?php echo esc_attr($s['username']); ?>" autocomplete="off" placeholder="نام کاربری پنل ملی‌پیامک">
                         </label>
-                        <label>رمز عبور
-                            <input type="password" name="<?php echo self::OPTION; ?>[password]" value="<?php echo esc_attr($s['password']); ?>" autocomplete="off">
+                        <label>رمز وب‌سرویس
+                            <input type="password" name="<?php echo self::OPTION; ?>[password]" value="<?php echo esc_attr($s['password']); ?>" autocomplete="new-password" placeholder="رمز عبور وب‌سرویس">
                         </label>
-                        <label>شماره/خط فرستنده
-                            <input type="text" name="<?php echo self::OPTION; ?>[sender]" value="<?php echo esc_attr($s['sender']); ?>">
+                        <label>شماره ارسال‌کننده / خط خدماتی
+                            <input type="text" name="<?php echo self::OPTION; ?>[sender]" value="<?php echo esc_attr($s['sender']); ?>" dir="ltr" inputmode="numeric" placeholder="مثال: 5000xxxx یا 3000xxxx">
+                            <small>برای ملی‌پیامک این مقدار شماره موبایل مدیر نیست؛ همان خط ارسال تعریف‌شده در پنل است.</small>
                         </label>
                     </section>
 
@@ -365,7 +367,8 @@ final class WSO_Plugin {
             }
             $res=wp_remote_post($url,$args);
         } elseif('melipayamak'===$provider){
-            if(!$s['username']||!$s['password']) return new WP_Error('wso_auth','نام کاربری/رمز ملی‌پیامک وارد نشده است.');
+            if(!$s['username']||!$s['password']) return new WP_Error('wso_auth','نام کاربری یا رمز وب‌سرویس ملی‌پیامک وارد نشده است.');
+            if(!$s['sender']) return new WP_Error('wso_sender','شماره ارسال‌کننده/خط خدماتی ملی‌پیامک وارد نشده است.');
             $url='https://rest.payamak-panel.com/api/SendSMS/SendSMS';
             $args['headers']=['Content-Type'=>'application/json'];
             $args['body']=wp_json_encode(['username'=>$s['username'],'password'=>$s['password'],'to'=>$phone,'from'=>$s['sender'],'text'=>$message,'isFlash'=>false]);
